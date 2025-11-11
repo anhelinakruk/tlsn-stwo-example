@@ -1,4 +1,4 @@
-use num_traits::{Zero, One};
+use num_traits::{One, Zero};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;

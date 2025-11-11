@@ -13,17 +13,24 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 
 /// Handler HTTP
-async fn handle_request(req: Request<hyper::body::Incoming>) -> Result<Response<String>, Infallible> {
+async fn handle_request(
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<String>, Infallible> {
     let path = req.uri().path();
     match path {
         "/fibonacci" => {
-            let challenge_index = 5;
+            let challenge_index1 = 5;
+            let challenge_index2 = 7;
             let response_json = json!({
-                "challenge_index": challenge_index,
+                "challenge_index1": challenge_index1,
+                "challenge_index2": challenge_index2,
                 "status": "ok"
             });
 
-            info!("Serving fibonacci challenge: index = {}", challenge_index);
+            info!(
+                "Serving fibonacci challenge: index1 = {}, index2 = {}",
+                challenge_index1, challenge_index2
+            );
 
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -75,10 +82,7 @@ pub async fn start_tls_server(addr: SocketAddr) -> Result<(), Box<dyn std::error
                     let io = TokioIo::new(tls_stream);
                     let service = service_fn(handle_request);
 
-                    if let Err(err) = http1::Builder::new()
-                        .serve_connection(io, service)
-                        .await
-                    {
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
                         error!("Error serving connection: {:?}", err);
                     }
                 }

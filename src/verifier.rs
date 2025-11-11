@@ -1,8 +1,8 @@
-use super::types::{FibonacciZKProofBundle, received_commitments};
+use super::types::{received_commitments, MultiFibZKProofBundle};
 
 use stwo::core::pcs::PcsConfig;
-use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::proof::StarkProof;
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tlsn::{
     config::{CertificateDer, ProtocolConfigValidator, RootCertStore},
     connection::ServerName,
@@ -86,24 +86,40 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
     }
     tracing::info!("Sent data contains expected server domain");
 
-    // Check received data commitments
-    tracing::info!("Step 2: Verifying hash commitment for fibonacci_index...");
+    // Check received data commitments (now we have TWO commitments, one for each index)
+    tracing::info!("Step 2: Verifying hash commitments for fibonacci indices...");
     let received_commitments = received_commitments(&transcript_commitments);
-    let received_commitment = received_commitments
-        .first()
-        .ok_or("Missing received hash commitment")?;
 
-    if received_commitment.direction != Direction::Received {
-        return Err("Hash commitment should be for received data".into());
-    }
-    if received_commitment.hash.alg != HashAlgId::SHA256 {
-        return Err("Hash commitment should use SHA256".into());
+    if received_commitments.len() < 2 {
+        return Err("Expected 2 received hash commitments (for both indices)".into());
     }
 
-    let committed_hash = &received_commitment.hash;
+    let received_commitment1 = received_commitments[0];
+    let received_commitment2 = received_commitments[1];
+
+    if received_commitment1.direction != Direction::Received {
+        return Err("First hash commitment should be for received data".into());
+    }
+    if received_commitment1.hash.alg != HashAlgId::SHA256 {
+        return Err("First hash commitment should use SHA256".into());
+    }
+
+    if received_commitment2.direction != Direction::Received {
+        return Err("Second hash commitment should be for received data".into());
+    }
+    if received_commitment2.hash.alg != HashAlgId::SHA256 {
+        return Err("Second hash commitment should use SHA256".into());
+    }
+
+    let committed_hash1 = &received_commitment1.hash;
+    let committed_hash2 = &received_commitment2.hash;
     tracing::info!(
-        "Received hash commitment verified: {}",
-        hex::encode(committed_hash.value.as_bytes())
+        "Received hash commitment 1 verified: {}",
+        hex::encode(committed_hash1.value.as_bytes())
+    );
+    tracing::info!(
+        "Received hash commitment 2 verified: {}",
+        hex::encode(committed_hash2.value.as_bytes())
     );
 
     // Receive ZK proof bundle from prover
@@ -115,12 +131,18 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
         return Err("No ZK proof data received from prover".into());
     }
 
-    let proof_bundle: FibonacciZKProofBundle = bincode::deserialize(&buf)
-        .map_err(|e| format!("Failed to deserialize ZK proof bundle: {}", e))?;
+    let proof_bundle: MultiFibZKProofBundle = bincode::deserialize(&buf)
+        .map_err(|e| format!("Failed to deserialize Multi-Fib ZK proof bundle: {}", e))?;
 
-    tracing::info!("Received ZK proof bundle:");
-    tracing::info!("  - fibonacci_value (public): {}", proof_bundle.fibonacci_value);
-    tracing::info!("  - log_size: {}", proof_bundle.log_size);
+    tracing::info!("Received Multi-Fib ZK proof bundle:");
+    tracing::info!(
+        "  - target_element_computing1: {}",
+        proof_bundle.target_element_computing1
+    );
+    tracing::info!(
+        "  - target_element_computing2: {}",
+        proof_bundle.target_element_computing2
+    );
     tracing::info!("  - proof size: {} bytes", proof_bundle.proof.len());
 
     // Deserialize the STARK proof
@@ -128,32 +150,57 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
     let stark_proof: StarkProof<Blake2sMerkleHasher> = bincode::deserialize(&proof_bundle.proof)
         .map_err(|e| format!("Failed to deserialize STARK proof: {}", e))?;
 
-    // Create statement for verification
-    let statement = crate::stwo::FibStatement {
-        log_size: proof_bundle.log_size,
-        fibonacci_value: proof_bundle.fibonacci_value,
-    };
+    // Deserialize statements
+    let statement0: crate::multi_fib::MultiFibStatement0 =
+        bincode::deserialize(&proof_bundle.statement0)
+            .map_err(|e| format!("Failed to deserialize statement0: {}", e))?;
+    let statement1: crate::multi_fib::MultiFibStatement1 =
+        bincode::deserialize(&proof_bundle.statement1)
+            .map_err(|e| format!("Failed to deserialize statement1: {}", e))?;
 
     // Verify the ZK proof
-    tracing::info!("Step 5: Verifying STARK proof...");
+    tracing::info!("Step 5: Verifying Multi-Fib STARK proof...");
     tracing::info!("  This proves that:");
-    tracing::info!("  1. Prover knows a secret fibonacci_index from the server");
-    tracing::info!("  2. Prover computed fibonacci(fibonacci_index) = {}", proof_bundle.fibonacci_value);
-    tracing::info!("  3. fibonacci_index matches the committed hash from TLSNotary");
-    tracing::info!("  Note: fibonacci_index remains SECRET to the verifier!");
+    tracing::info!("  1. Prover knows secret fibonacci indices from the server");
+    tracing::info!(
+        "  2. Prover computed two Fibonacci values at indices {} and {}",
+        proof_bundle.target_element_computing1,
+        proof_bundle.target_element_computing2
+    );
+    tracing::info!("  3. Scheduler component computed the sum of these values");
+    tracing::info!("  4. All computation matches the committed hash from TLSNotary");
+    tracing::info!("  Note: The actual fibonacci indices remain SECRET to the verifier!");
 
     let config = PcsConfig::default();
-    crate::stwo::verify_fib(stark_proof, statement, config)?;
+    crate::multi_fib::verify_multi_fib(
+        stark_proof,
+        proof_bundle.target_element_computing1,
+        proof_bundle.target_element_computing2,
+        statement0,
+        statement1,
+        config,
+    )?;
 
-    tracing::info!("STARK proof verified successfully!");
+    tracing::info!("Multi-Fib STARK proof verified successfully!");
 
     // Summary
     tracing::info!("\n=== Verification Complete ===");
     tracing::info!("TLSNotary attestation verified");
     tracing::info!("Server identity confirmed: {}", expected_server_domain);
-    tracing::info!("fibonacci_index committed via hash: {}", hex::encode(committed_hash.value.as_bytes()));
-    tracing::info!("ZK proof verified: fibonacci(SECRET_INDEX) = {}", proof_bundle.fibonacci_value);
-    tracing::info!("Prover demonstrated knowledge of server's secret without revealing it!");
+    tracing::info!(
+        "fibonacci_index1 committed via hash: {}",
+        hex::encode(committed_hash1.value.as_bytes())
+    );
+    tracing::info!(
+        "fibonacci_index2 committed via hash: {}",
+        hex::encode(committed_hash2.value.as_bytes())
+    );
+    tracing::info!(
+        "ZK proof verified: Scheduler computed sum of Fibonacci values at indices {} and {}",
+        proof_bundle.target_element_computing1,
+        proof_bundle.target_element_computing2
+    );
+    tracing::info!("Prover demonstrated knowledge of server's secrets without revealing them!");
 
     Ok(transcript)
 }

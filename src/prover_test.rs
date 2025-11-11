@@ -41,8 +41,8 @@ mod tests {
         let body_end = body.span().indices().max().expect("No body end") + 1;
         let body_bytes = &response_str.as_bytes()[body_start..body_end];
 
-        let json_value: serde_json::Value = serde_json::from_slice(body_bytes)
-            .expect("Failed to parse JSON");
+        let json_value: serde_json::Value =
+            serde_json::from_slice(body_bytes).expect("Failed to parse JSON");
 
         let index = json_value
             .get("challenge_index")
@@ -116,21 +116,9 @@ mod tests {
     fn test_response_parsing_structure() {
         // Test different response structures
         let test_responses = vec![
-            (
-                json!({"challenge_index": 0}),
-                0,
-                "Zero index",
-            ),
-            (
-                json!({"challenge_index": 1}),
-                1,
-                "Index 1",
-            ),
-            (
-                json!({"challenge_index": 10}),
-                10,
-                "Index 10",
-            ),
+            (json!({"challenge_index": 0}), 0, "Zero index"),
+            (json!({"challenge_index": 1}), 1, "Index 1"),
+            (json!({"challenge_index": 10}), 10, "Index 10"),
         ];
 
         for (json_body, expected_index, description) in test_responses {
@@ -157,13 +145,14 @@ mod tests {
             let body_end = body.span().indices().max().expect("No body end") + 1;
             let body_bytes = &response_str.as_bytes()[body_start..body_end];
 
-            let json_value: serde_json::Value = serde_json::from_slice(body_bytes)
-                .expect("Failed to parse JSON");
+            let json_value: serde_json::Value =
+                serde_json::from_slice(body_bytes).expect("Failed to parse JSON");
 
             let index = json_value
                 .get("challenge_index")
                 .and_then(|v| v.as_u64())
-                .expect("challenge_index not found or not a valid u64") as usize;
+                .expect("challenge_index not found or not a valid u64")
+                as usize;
 
             assert_eq!(index, expected_index, "{} failed", description);
             println!("✅ {}: index = {}", description, index);
@@ -201,7 +190,11 @@ mod tests {
             "fibonacci_value should be preserved"
         );
         assert_eq!(deserialized.log_size, 4, "log_size should be preserved");
-        assert_eq!(deserialized.proof.len(), 5, "proof length should be preserved");
+        assert_eq!(
+            deserialized.proof.len(),
+            5,
+            "proof length should be preserved"
+        );
 
         println!("✅ Proof bundle roundtrip successful");
     }

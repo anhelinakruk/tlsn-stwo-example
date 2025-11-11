@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use super::types::{FibonacciZKProofBundle, received_commitments, received_secrets};
+use super::types::{received_commitments, received_secrets, MultiFibZKProofBundle};
 
 use http_body_util::Empty;
 use hyper::{body::Bytes, header, Request, StatusCode, Uri};
@@ -12,10 +12,10 @@ use spansy::{
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::CommitmentSchemeProver;
-use stwo::core::vcs::blake2_merkle::Blake2sMerkleChannel;
 use tlsn::{
     config::{CertificateDer, ProtocolConfig, RootCertStore},
     connection::ServerName,
@@ -160,8 +160,13 @@ pub async fn prover<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
         .first()
         .ok_or("No received secrets found")?; // hash blinder
 
-    let fibonacci_index = extract_fibonacci_index(received)?;
-    let proof_bundle = generate_zk_proof(fibonacci_index, received_commitment, received_secret)?;
+    let (fibonacci_index1, fibonacci_index2) = extract_fibonacci_indices(received)?;
+    let proof_bundle = generate_multi_fib_zk_proof(
+        fibonacci_index1,
+        fibonacci_index2,
+        received_commitment,
+        received_secret,
+    )?;
 
     // Send zk proof bundle to verifier
     let serialized_proof = bincode::serialize(&proof_bundle)?;
@@ -221,37 +226,67 @@ fn reveal_received(
         return Err("Expected JSON body content".into());
     };
 
-    // Commit to hash of fibonacci_index (this is the SECRET value from server)
-    let challenge_index = json
-        .get("challenge_index")
-        .ok_or("challenge_index field not found in JSON")?;
+    // Commit to hash of both fibonacci indices (these are SECRET values from server)
+    let challenge_index1 = json
+        .get("challenge_index1")
+        .ok_or("challenge_index1 field not found in JSON")?;
+    let challenge_index2 = json
+        .get("challenge_index2")
+        .ok_or("challenge_index2 field not found in JSON")?;
 
-    let start_pos = challenge_index
+    let start_pos1 = challenge_index1
         .span()
         .indices()
         .min()
-        .ok_or("Could not find challenge_index start position")?;
-    let end_pos = challenge_index
+        .ok_or("Could not find challenge_index1 start position")?;
+    let end_pos1 = challenge_index1
         .span()
         .indices()
         .max()
-        .ok_or("Could not find challenge_index end position")?
+        .ok_or("Could not find challenge_index1 end position")?
         + 1;
 
-    transcript_commitment_builder.commit_recv(&(start_pos..end_pos))?;
+    let start_pos2 = challenge_index2
+        .span()
+        .indices()
+        .min()
+        .ok_or("Could not find challenge_index2 start position")?;
+    let end_pos2 = challenge_index2
+        .span()
+        .indices()
+        .max()
+        .ok_or("Could not find challenge_index2 end position")?
+        + 1;
 
-    // Reveal the rest of the response (headers, status, etc.)
-    if start_pos > 0 {
-        builder.reveal_recv(&(0..start_pos))?;
+    // Commit to both indices
+    transcript_commitment_builder.commit_recv(&(start_pos1..end_pos1))?;
+    transcript_commitment_builder.commit_recv(&(start_pos2..end_pos2))?;
+
+    // Reveal the rest of the response (everything except the two indices)
+    let min_start = start_pos1.min(start_pos2);
+    let max_end = end_pos1.max(end_pos2);
+
+    if min_start > 0 {
+        builder.reveal_recv(&(0..min_start))?;
     }
-    if end_pos < received.len() {
-        builder.reveal_recv(&(end_pos..received.len()))?;
+
+    // Reveal between the two indices if they're not adjacent
+    if start_pos1 < start_pos2 && end_pos1 < start_pos2 {
+        builder.reveal_recv(&(end_pos1..start_pos2))?;
+    } else if start_pos2 < start_pos1 && end_pos2 < start_pos1 {
+        builder.reveal_recv(&(end_pos2..start_pos1))?;
+    }
+
+    if max_end < received.len() {
+        builder.reveal_recv(&(max_end..received.len()))?;
     }
 
     Ok(())
 }
 
-fn extract_fibonacci_index(received: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
+fn extract_fibonacci_indices(
+    received: &[u8],
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let resp = Responses::new_from_slice(received).collect::<Result<Vec<_>, _>>()?;
     let response = resp.first().ok_or("No responses found")?;
     let body = response.body.as_ref().ok_or("Response body not found")?;
@@ -261,38 +296,62 @@ fn extract_fibonacci_index(received: &[u8]) -> Result<usize, Box<dyn std::error:
     };
 
     // Find where the JSON body starts in the original bytes
-    let body_start = body.span().indices().min().ok_or("Could not find body start")?;
-    let body_end = body.span().indices().max().ok_or("Could not find body end")? + 1;
+    let body_start = body
+        .span()
+        .indices()
+        .min()
+        .ok_or("Could not find body start")?;
+    let body_end = body
+        .span()
+        .indices()
+        .max()
+        .ok_or("Could not find body end")?
+        + 1;
     let body_bytes = &received[body_start..body_end];
 
     // Parse the body bytes directly with serde_json
     let json_value: serde_json::Value = serde_json::from_slice(body_bytes)?;
 
-    let index = json_value
-        .get("challenge_index")
+    let index1 = json_value
+        .get("challenge_index1")
         .and_then(|v| v.as_u64())
-        .ok_or("challenge_index not found or not a valid u64")?
-        as usize;
+        .ok_or("challenge_index1 not found or not a valid u64")? as usize;
 
-    Ok(index)
+    let index2 = json_value
+        .get("challenge_index2")
+        .and_then(|v| v.as_u64())
+        .ok_or("challenge_index2 not found or not a valid u64")? as usize;
+
+    Ok((index1, index2))
 }
 
-fn generate_zk_proof(
-    fibonacci_index: usize,
+fn generate_multi_fib_zk_proof(
+    fibonacci_index1: usize,
+    fibonacci_index2: usize,
     _committed_hash: &PlaintextHash,
     _blinder_secret: &PlaintextHashSecret,
-) -> Result<FibonacciZKProofBundle, Box<dyn std::error::Error>> {
-    tracing::info!("Generating ZK proof with Stwo...");
-    tracing::info!("Private input: fibonacci_index = {} (from server)", fibonacci_index);
+) -> Result<MultiFibZKProofBundle, Box<dyn std::error::Error>> {
+    tracing::info!("Generating Multi-Fib ZK proof with Stwo...");
+
+    // Use both indices from server
+    let target_element_computing1 = fibonacci_index1;
+    let target_element_computing2 = fibonacci_index2;
+
+    tracing::info!(
+        "Private inputs: index1 = {}, index2 = {} (from server)",
+        target_element_computing1,
+        target_element_computing2
+    );
 
     // Setup Stwo proof system
     let config = PcsConfig::default();
-    let min_log_size: u32 = if fibonacci_index + 1 <= 1 {
+    let max_target = target_element_computing1.max(target_element_computing2);
+    let min_log_size: u32 = if max_target + 1 <= 1 {
         0
     } else {
-        (fibonacci_index as u32).ilog2() + 1
+        (max_target as u32).ilog2() + 1
     };
-    let log_size = min_log_size.max(4); 
+    let log_size = min_log_size.max(4);
 
     let twiddles = SimdBackend::precompute_twiddles(
         CanonicCoset::new(log_size + 1 + config.fri_config.log_blowup_factor)
@@ -301,28 +360,30 @@ fn generate_zk_proof(
     );
 
     let channel = &mut Blake2sChannel::default();
-    let commitment_scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(
-        config,
-        &twiddles,
-    );
+    let commitment_scheme =
+        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
-    let (proof, _component, statement) =
-        crate::stwo::prove_simple_fib(fibonacci_index, channel, commitment_scheme)?;
+    let (proof, _computing_components, _scheduler_component, statement0, statement1) =
+        crate::multi_fib::prove_multi_fib(
+            target_element_computing1,
+            target_element_computing2,
+            channel,
+            commitment_scheme,
+        )?;
 
-    let fibonacci_value = statement.fibonacci_value;
-
-    tracing::info!(
-        "Public output: fibonacci_value = {} (COMPUTED by prover)",
-        fibonacci_value
-    );
-    tracing::info!("STARK proof generated successfully!");
+    tracing::info!("Multi-Fib STARK proof generated successfully!");
+    tracing::info!("Scheduler computed sum of two Fibonacci values in ZK");
 
     let proof_bytes = bincode::serialize(&proof)?;
+    let statement0_bytes = bincode::serialize(&statement0)?;
+    let statement1_bytes = bincode::serialize(&statement1)?;
 
-    let proof_bundle = FibonacciZKProofBundle {
+    let proof_bundle = MultiFibZKProofBundle {
         proof: proof_bytes,
-        fibonacci_value,
-        log_size: statement.log_size,
+        target_element_computing1,
+        target_element_computing2,
+        statement0: statement0_bytes,
+        statement1: statement1_bytes,
     };
 
     Ok(proof_bundle)

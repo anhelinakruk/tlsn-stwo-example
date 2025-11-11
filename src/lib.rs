@@ -1,8 +1,9 @@
+pub mod multi_fib;
 pub mod prover;
-pub mod verifier;
+pub mod simple_fib;
 pub mod types;
-pub mod stwo;
+pub mod verifier;
 
 pub use prover::prover;
+pub use types::{received_commitments, received_secrets, MultiFibZKProofBundle};
 pub use verifier::verifier;
-pub use types::{FibonacciZKProofBundle, received_commitments, received_secrets};

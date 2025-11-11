@@ -27,7 +27,8 @@ impl FrameworkEval for FibEval {
         let [a_curr, _a_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         let [b_curr, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         let [c_curr, c_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-        let [is_target_curr, is_target_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        let [is_target_curr, is_target_prev] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
 
         // CONSTRAINT 1: Fibonacci relation c = a + b
         eval.add_constraint(c_curr.clone() - (a_curr.clone() + b_curr.clone()));

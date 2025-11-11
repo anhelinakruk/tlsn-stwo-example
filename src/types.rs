@@ -4,16 +4,20 @@ use tlsn::transcript::{
     Direction, TranscriptCommitment, TranscriptSecret,
 };
 
-/// Bundle containing the Fibonacci ZK proof and public outputs
+/// Bundle containing the Multi-Fibonacci ZK proof with scheduler
 #[derive(Serialize, Deserialize, Debug)]
-pub struct FibonacciZKProofBundle {
+pub struct MultiFibZKProofBundle {
     /// Serialized STARK proof
     pub proof: Vec<u8>,
-    /// Public output: the computed Fibonacci value
-    pub fibonacci_value: u32,
-    /// Log size of the proof (determines trace size)
-    pub log_size: u32,
-    // Note: fibonacci_index is NOT included - it remains private!
+    /// Target element for first computing component
+    pub target_element_computing1: usize,
+    /// Target element for second computing component
+    pub target_element_computing2: usize,
+    /// Serialized MultiFibStatement0 (log_size)
+    pub statement0: Vec<u8>,
+    /// Serialized MultiFibStatement1 (claimed sums)
+    pub statement1: Vec<u8>,
+    // Note: actual fibonacci indices remain private!
 }
 
 /// Extract hash commitments for received data from transcript commitments

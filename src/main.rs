@@ -1,8 +1,9 @@
+pub mod multi_fib;
 mod prover;
+pub mod prover_test;
+pub mod simple_fib;
 mod types;
 mod verifier;
-pub mod stwo;
-pub mod prover_test;
 
 use prover::prover;
 use std::{
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Address: {}", server_addr);
 
     // Connect prover and verifier with duplex channels
-    let (prover_socket, verifier_socket) = tokio::io::duplex(1 << 23); 
+    let (prover_socket, verifier_socket) = tokio::io::duplex(1 << 23);
     let (prover_extra_socket, verifier_extra_socket) = tokio::io::duplex(1 << 23);
 
     // Run prover and verifier concurrently
