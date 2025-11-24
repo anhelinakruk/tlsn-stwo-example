@@ -4,11 +4,7 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tlsn::{
-    config::{CertificateDer, ProtocolConfigValidator, RootCertStore},
-    connection::ServerName,
-    hash::HashAlgId,
-    transcript::{Direction, PartialTranscript},
-    verifier::{Verifier, VerifierConfig, VerifierOutput, VerifyConfig},
+    config::{CertificateDer, ProtocolConfigValidator, RootCertStore}, connection::ServerName, hash::HashAlgId, transcript::{Direction, PartialTranscript}, verifier::{Verifier, VerifierConfig, VerifierOutput, VerifyConfig}
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -100,15 +96,15 @@ pub async fn verifier<T: AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static>
     if received_commitment1.direction != Direction::Received {
         return Err("First hash commitment should be for received data".into());
     }
-    if received_commitment1.hash.alg != HashAlgId::SHA256 {
-        return Err("First hash commitment should use SHA256".into());
+    if received_commitment1.hash.alg != HashAlgId::BLAKE3 {
+        return Err("First hash commitment should use BLAKE3".into());
     }
 
     if received_commitment2.direction != Direction::Received {
         return Err("Second hash commitment should be for received data".into());
     }
-    if received_commitment2.hash.alg != HashAlgId::SHA256 {
-        return Err("Second hash commitment should use SHA256".into());
+    if received_commitment2.hash.alg != HashAlgId::BLAKE3 {
+        return Err("Second hash commitment should use BLAKE3".into());
     }
 
     let committed_hash1 = &received_commitment1.hash;

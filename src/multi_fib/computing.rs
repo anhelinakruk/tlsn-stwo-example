@@ -78,3 +78,19 @@ impl FrameworkEval for FibonacciComputingEval {
 }
 
 pub type FibonacciComputingComponent = FrameworkComponent<FibonacciComputingEval>;
+
+pub fn fibonacci_computing_info() -> stwo_constraint_framework::InfoEvaluator {
+    use super::FibonacciRelation;
+    use num_traits::Zero;
+    let component = FibonacciComputingEval {
+        log_n_rows: 1,
+        initial_a: 1,
+        initial_b: 1,
+        fibonacci_relation: FibonacciRelation::dummy(),
+        claimed_sum: SecureField::zero(),
+        is_first_id: PreProcessedColumnId { id: "dummy_is_first".to_string() },
+        is_active_id: PreProcessedColumnId { id: "dummy_is_active".to_string() },
+        is_target_id: PreProcessedColumnId { id: "dummy_is_target".to_string() },
+    };
+    component.evaluate(stwo_constraint_framework::InfoEvaluator::empty())
+}

@@ -1,62 +1,45 @@
-#![feature(portable_simd)]
-#![feature(array_chunks)]
-#![feature(iter_array_chunks)]
-
-pub mod multi_fib;
 mod prover;
-pub mod prover_test;
-pub mod simple_fib;
 mod types;
 mod verifier;
-mod blake;
 
 use prover::prover;
 use std::{
     env,
     net::{IpAddr, SocketAddr},
 };
+use tlsn_server_fixture::DEFAULT_FIXTURE_PORT;
+use tlsn_server_fixture_certs::SERVER_DOMAIN;
 use verifier::verifier;
-
-const TEST_SERVER_DOMAIN: &str = "localhost";
-const TEST_SERVER_PORT: u16 = 3000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    // Get server config from environment or use defaults
     let server_host: String = env::var("SERVER_HOST").unwrap_or("127.0.0.1".into());
     let server_port: u16 = env::var("SERVER_PORT")
         .map(|port| port.parse().expect("port should be valid integer"))
-        .unwrap_or(TEST_SERVER_PORT);
+        .unwrap_or(DEFAULT_FIXTURE_PORT);
 
-    let server_domain = env::var("SERVER_DOMAIN").unwrap_or(TEST_SERVER_DOMAIN.to_string());
-
-    // Build URI
-    let uri = format!("https://{}:{}/fibonacci", server_domain, server_port);
+    // We use SERVER_DOMAIN here to make sure it matches the domain in the test
+    // server's certificate.
+    let uri = format!("https://{SERVER_DOMAIN}:{server_port}/elster");
     let server_ip: IpAddr = server_host
         .parse()
         .map_err(|e| format!("Invalid IP address '{}': {}", server_host, e))?;
     let server_addr = SocketAddr::from((server_ip, server_port));
 
-    tracing::info!("=== Fibonacci ZK + TLSNotary Demo ===");
-    tracing::info!("Server: {}", uri);
-    tracing::info!("Address: {}", server_addr);
-
-    // Connect prover and verifier with duplex channels
+    // Connect prover and verifier.
     let (prover_socket, verifier_socket) = tokio::io::duplex(1 << 23);
     let (prover_extra_socket, verifier_extra_socket) = tokio::io::duplex(1 << 23);
 
-    // Run prover and verifier concurrently
-    let (_prover_result, transcript) = tokio::try_join!(
+    let (_, transcript) = tokio::try_join!(
         prover(prover_socket, prover_extra_socket, &server_addr, &uri),
-        verifier(verifier_socket, verifier_extra_socket, &server_domain)
+        verifier(verifier_socket, verifier_extra_socket)
     )?;
 
-    println!("\n=== SUCCESS ===");
-    println!("✅ Successfully verified {}", &uri);
-    println!("✅ Fibonacci computation verified in ZK!");
-    println!("✅ fibonacci_index remains SECRET (zero-knowledge!)\n");
+    println!("---");
+    println!("Successfully verified {}", &uri);
+    println!("Age verified in ZK: 18+ ✅\n");
 
     println!(
         "Verified sent data:\n{}",

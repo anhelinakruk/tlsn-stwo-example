@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 
 use super::types::{received_commitments, received_secrets, MultiFibZKProofBundle};
 
+use blake3;
+use hex;
 use http_body_util::Empty;
 use hyper::{body::Bytes, header, Request, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
@@ -17,16 +19,11 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::CommitmentSchemeProver;
 use tlsn::{
-    config::{CertificateDer, ProtocolConfig, RootCertStore},
-    connection::ServerName,
-    hash::HashAlgId,
-    prover::{ProveConfig, ProveConfigBuilder, Prover, ProverConfig, TlsConfig},
-    transcript::{
-        hash::{PlaintextHash, PlaintextHashSecret},
-        TranscriptCommitConfig, TranscriptCommitConfigBuilder, TranscriptCommitmentKind,
-    },
+    config::{CertificateDer, ProtocolConfig, RootCertStore}, connection::ServerName, hash::HashAlgId, prover::{ProveConfig, ProveConfigBuilder, Prover, ProverConfig, TlsConfig}, transcript::{
+        TranscriptCommitConfig, TranscriptCommitConfigBuilder, TranscriptCommitmentKind, hash::{PlaintextHash, PlaintextHashSecret}
+    }
 };
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::instrument;
@@ -132,7 +129,7 @@ pub async fn prover<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     // Create hash commitment for the fibonacci_index field from the response
     let mut transcript_commitment_builder = TranscriptCommitConfig::builder(&transcript);
     transcript_commitment_builder.default_kind(TranscriptCommitmentKind::Hash {
-        alg: HashAlgId::SHA256,
+        alg: HashAlgId::BLAKE3,
     });
 
     reveal_received(
@@ -152,20 +149,55 @@ pub async fn prover<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
 
     // Generate ZK proof that fibonacci(secret_index) = computed_value
     let received_commitments = received_commitments(&prover_output.transcript_commitments);
-    let received_commitment = received_commitments
-        .first()
-        .ok_or("No received commitments found")?; // committed hash (of fibonacci_index)
+
+    if received_commitments.len() < 2 {
+        return Err("Expected at least 2 hash commitments (one for each index)".into());
+    }
+
+    let received_commitment1 = received_commitments[0];
+    let received_commitment2 = received_commitments[1];
+
     let received_secrets = received_secrets(&prover_output.transcript_secrets);
-    let received_secret = received_secrets
-        .first()
-        .ok_or("No received secrets found")?; // hash blinder
+    if received_secrets.len() < 2 {
+        return Err("Expected at least 2 hash secrets (one for each index)".into());
+    }
+
+    let received_secret1 = received_secrets[0];
+    let received_secret2 = received_secrets[1];
 
     let (fibonacci_index1, fibonacci_index2) = extract_fibonacci_indices(received)?;
+
+    // Verify hash commitments (like in interactive_zk)
+    verify_fibonacci_index_commitment(
+        fibonacci_index1,
+        received_commitment1,
+        received_secret1,
+    )?;
+    verify_fibonacci_index_commitment(
+        fibonacci_index2,
+        received_commitment2,
+        received_secret2,
+    )?;
+
+    // Extract blinders (16 bytes each)
+    let blinder1: [u8; 16] = received_secret1
+        .blinder
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "Blinder1 must be exactly 16 bytes")?;
+    let blinder2: [u8; 16] = received_secret2
+        .blinder
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "Blinder2 must be exactly 16 bytes")?;
+
     let proof_bundle = generate_multi_fib_zk_proof(
         fibonacci_index1,
         fibonacci_index2,
-        received_commitment,
-        received_secret,
+        received_commitment1,
+        received_commitment2,
+        &blinder1,
+        &blinder2,
     )?;
 
     // Send zk proof bundle to verifier
@@ -258,6 +290,16 @@ fn reveal_received(
         .ok_or("Could not find challenge_index2 end position")?
         + 1;
 
+    // Debug: show what we're committing to
+    tracing::info!("Committing to index1 bytes: {:?} (range {}..{})",
+        &received[start_pos1..end_pos1],
+        start_pos1, end_pos1);
+    tracing::info!("Committing to index2 bytes: {:?} (range {}..{})",
+        &received[start_pos2..end_pos2],
+        start_pos2, end_pos2);
+    tracing::info!("Index1 as string: {:?}", String::from_utf8_lossy(&received[start_pos1..end_pos1]));
+    tracing::info!("Index2 as string: {:?}", String::from_utf8_lossy(&received[start_pos2..end_pos2]));
+
     // Commit to both indices
     transcript_commitment_builder.commit_recv(&(start_pos1..end_pos1))?;
     transcript_commitment_builder.commit_recv(&(start_pos2..end_pos2))?;
@@ -325,11 +367,117 @@ fn extract_fibonacci_indices(
     Ok((index1, index2))
 }
 
+/// Verify that the blinded hash commitment is correct (like in interactive_zk)
+/// This ensures: hash(fibonacci_index_bytes + blinder) == committed_hash
+fn verify_fibonacci_index_commitment(
+    fibonacci_index: usize,
+    received_commitment: &PlaintextHash,
+    received_secret: &PlaintextHashSecret,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tlsn::transcript::Direction;
+
+    // Verify commitment and secret are for received data
+    assert_eq!(received_commitment.direction, Direction::Received);
+    assert_eq!(received_commitment.hash.alg, HashAlgId::BLAKE3);
+    assert_eq!(received_secret.direction, Direction::Received);
+    assert_eq!(received_secret.alg, HashAlgId::BLAKE3);
+
+    let committed_hash = received_commitment.hash.value.as_bytes();
+    let blinder = received_secret.blinder.as_bytes();
+
+    // Convert fibonacci_index to bytes (as it appears in JSON: "5" -> b"5")
+    let index_string = fibonacci_index.to_string();
+    let index_bytes = index_string.as_bytes();
+
+    tracing::info!("Verifying hash for index: {}", fibonacci_index);
+    tracing::info!("  Index bytes: {:?}", index_bytes);
+    tracing::info!("  Blinder: {}", hex::encode(blinder));
+
+    // Compute hash(index_bytes + blinder) using BLAKE3
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(index_bytes);
+    hasher.update(blinder);
+    let computed_hash = hasher.finalize();
+
+    tracing::info!("  Computed hash: {}", hex::encode(computed_hash.as_bytes()));
+
+    // Verify computed hash matches committed hash
+    if committed_hash != computed_hash.as_bytes() {
+        tracing::error!(
+            "Hash verification failed for fibonacci_index {}",
+            fibonacci_index
+        );
+        tracing::error!("  Expected (committed): {}", hex::encode(committed_hash));
+        tracing::error!("  Computed:             {}", hex::encode(computed_hash.as_bytes()));
+        return Err("Computed hash does not match committed hash".into());
+    }
+
+    tracing::info!(
+        "✓ Hash commitment verified for fibonacci_index {}: {}",
+        fibonacci_index,
+        hex::encode(committed_hash)
+    );
+
+    Ok(())
+}
+
+/// Przygotowuje BLAKE3 input z fibonacci_index + blinder
+/// Format zgodny z TLSNotary: hash(index_bytes + blinder)
+/// Zwraca (v, m) jako arrays gotowe do konwersji na u32x16
+pub fn prepare_blake3_input(
+    fibonacci_index: usize,
+    blinder: &[u8; 16],
+) -> ([u32; 16], [u32; 16]) {
+
+    // Konwertuj fibonacci_index na bytes jak w JSON: "5" -> b"5"
+    let index_string = fibonacci_index.to_string();
+    let index_bytes = index_string.as_bytes();
+
+    // Przygotuj wiadomość: index_bytes + blinder (max 64 bytes)
+    let mut message = [0u8; 64];
+    let index_len = index_bytes.len();
+    message[..index_len].copy_from_slice(index_bytes);
+    message[index_len..index_len + 16].copy_from_slice(blinder);
+
+    let total_len = index_len + 16;
+
+    // Konwertuj do u32 array (little-endian) dla BLAKE3
+    let m: [u32; 16] = std::array::from_fn(|i| {
+        u32::from_le_bytes([
+            message[i * 4],
+            message[i * 4 + 1],
+            message[i * 4 + 2],
+            message[i * 4 + 3],
+        ])
+    });
+
+    // Initialize BLAKE3 state (IV)
+    const IV: [u32; 8] = [
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+        0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+    ];
+
+    let mut v = [0u32; 16];
+    // First 8 words: chaining value (IV for first chunk)
+    v[0..8].copy_from_slice(&IV);
+    // Next 4 words: IV[0..4]
+    v[8..12].copy_from_slice(&IV[0..4]);
+    // Last 4 words: counter_low, counter_high, block_len, flags
+    v[12] = 0; // counter_low
+    v[13] = 0; // counter_high
+    v[14] = total_len as u32; // block_len in bytes
+    v[15] = 0b1011; // flags: CHUNK_START | CHUNK_END | ROOT
+
+    (v, m)
+}
+
 fn generate_multi_fib_zk_proof(
     fibonacci_index1: usize,
     fibonacci_index2: usize,
-    _committed_hash: &PlaintextHash,
-    _blinder_secret: &PlaintextHashSecret,
+    committed_hash1: &PlaintextHash,
+    committed_hash2: &PlaintextHash,
+    blinder1: &[u8; 16],
+    blinder2: &[u8; 16],
 ) -> Result<MultiFibZKProofBundle, Box<dyn std::error::Error>> {
     tracing::info!("Generating Multi-Fib ZK proof with Stwo...");
 
@@ -351,13 +499,47 @@ fn generate_multi_fib_zk_proof(
     } else {
         (max_target as u32).ilog2() + 1
     };
-    let log_size = min_log_size.max(4);
+    let fib_log_size = min_log_size.max(4);
+
+    // BLAKE3 log_size: 2 instances
+    let num_instances: usize = 2;
+    let blake3_log_size = crate::multi_fib::compute_blake3_log_size(num_instances);
+
+    // Max log_size considering all circuit components
+    let max_log_size = crate::multi_fib::compute_max_log_size(fib_log_size, blake3_log_size);
 
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(log_size + 1 + config.fri_config.log_blowup_factor)
+        CanonicCoset::new(max_log_size + 1 + config.fri_config.log_blowup_factor)
             .circle_domain()
             .half_coset,
     );
+
+    tracing::info!("Proof parameters: fib_log_size={}, blake3_log_size={}, max_log_size={}",
+        fib_log_size, blake3_log_size, max_log_size);
+
+    // Prepare BLAKE3 inputs
+    let (v1, m1) = prepare_blake3_input(fibonacci_index1, blinder1);
+    let (v2, m2) = prepare_blake3_input(fibonacci_index2, blinder2);
+    let blake3_inputs = vec![(v1, m1), (v2, m2)];
+
+    // Expected hashes (committed_hash from TLSNotary)
+    let hash1: [u8; 32] = committed_hash1
+        .hash
+        .value
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "committed_hash1 must be 32 bytes")?;
+    let hash2: [u8; 32] = committed_hash2
+        .hash
+        .value
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "committed_hash2 must be 32 bytes")?;
+    let blake3_expected_hashes = vec![hash1, hash2];
+
+    tracing::info!("BLAKE3 verification enabled: 2 hash instances");
+    tracing::info!("  Hash1 (committed): {}", hex::encode(hash1));
+    tracing::info!("  Hash2 (committed): {}", hex::encode(hash2));
 
     let channel = &mut Blake2sChannel::default();
     let commitment_scheme =
@@ -367,6 +549,8 @@ fn generate_multi_fib_zk_proof(
         crate::multi_fib::prove_multi_fib(
             target_element_computing1,
             target_element_computing2,
+            Some(blake3_inputs),
+            Some(blake3_expected_hashes),
             channel,
             commitment_scheme,
         )?;

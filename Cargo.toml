@@ -4,13 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-stwo = { git = "https://github.com/starkware-libs/stwo", branch = "dev", features = [
-    "prover",
-] }
-stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo", branch = "dev", features = [
-    "prover",
-    "std",
-] }
+stwo = { git = "https://github.com/starkware-libs/stwo", branch = "dev", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo", branch = "dev", features = ["prover", "std"] }
 itertools = "0.13"
 num-traits = "0.2"
 serde = { version = "1.0", features = ["derive"] }
@@ -27,6 +22,7 @@ tlsn-server-fixture-certs = { git = "https://github.com/tlsnotary/tlsn/", versio
 tls-core = { git = "https://github.com/tlsnotary/tlsn", tag = "v0.1.0-alpha.13", version = "0.1.0-alpha.13", package = "tlsn-tls-core" }
 
 bincode = "1.3"
+blake3 = { version = "1.5" }
 chrono = "0.4"
 futures = "0.3"
 http-body-util = "0.1"
@@ -45,3 +41,6 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[dev-dependencies]
+test-log = "0.2"

@@ -142,8 +142,8 @@ pub fn gen_scheduler_trace(
 
     let sum_value = fib1_c_value + fib2_c_value;
 
-    println!(
-        "  Scheduler trace: fib1_c={}, fib2_c={}, sum={}",
+    tracing::debug!(
+        "Scheduler trace: fib1_c={}, fib2_c={}, sum={}",
         fib1_c_value.0, fib2_c_value.0, sum_value.0
     );
 
