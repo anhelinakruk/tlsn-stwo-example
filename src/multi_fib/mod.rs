@@ -4,8 +4,8 @@ mod computing;
 mod scheduler;
 mod trace_gen;
 
-pub use computing::{FibonacciComputingComponent, FibonacciComputingEval, fibonacci_computing_info};
-pub use scheduler::{FibonacciSchedulerComponent, FibonacciSchedulerEval, fibonacci_scheduler_info};
+pub use computing::{FibonacciComputingComponent, FibonacciComputingEval};
+pub use scheduler::{FibonacciSchedulerComponent, FibonacciSchedulerEval};
 pub use trace_gen::{
     gen_computing_interaction_trace, gen_computing_trace, gen_scheduler_interaction_trace,
     gen_scheduler_trace,
@@ -13,8 +13,10 @@ pub use trace_gen::{
 
 pub const LOG_CONSTRAINT_DEGREE: u32 = 1;
 pub const FIBONACCI_RELATION_SIZE: usize = 1;
+pub const INDEX_RELATION_SIZE: usize = 1;
 
 relation!(FibonacciRelation, FIBONACCI_RELATION_SIZE);
+relation!(IndexRelation, INDEX_RELATION_SIZE);
 
 use num_traits::{One, Zero};
 use std::simd::u32x16;
@@ -36,25 +38,10 @@ use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
-// Import BLAKE3 modules
 use crate::blake::{round as blake_round, xor_table as blake_xor, BlakeXorElements, N_ROUNDS, ROUND_LOG_SPLIT};
 use crate::blake::scheduler as blake_scheduler;
 use crate::blake::scheduler::BlakeInput;
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Computes the log_size needed for BLAKE3 circuit based on number of instances.
-///
-/// BLAKE3 uses SIMD operations with LOG_N_LANES minimum size. For multiple instances,
-/// we need log2(num_instances) + LOG_N_LANES.
-///
-/// # Arguments
-/// * `num_instances` - Number of BLAKE3 hash computations to perform in parallel
-///
-/// # Returns
-/// The log_size (log2 of trace rows) needed for BLAKE3 circuit
 pub fn compute_blake3_log_size(num_instances: usize) -> u32 {
     if num_instances <= 1 {
         LOG_N_LANES
@@ -63,19 +50,6 @@ pub fn compute_blake3_log_size(num_instances: usize) -> u32 {
     }
 }
 
-/// Computes the maximum log_size needed for twiddles precomputation.
-///
-/// This accounts for:
-/// - Fibonacci circuit: needs fib_log_size
-/// - BLAKE3 rounds: need blake3_log_size + ROUND_LOG_SPLIT[0] (largest split)
-/// - XOR12 table: needs minimum log_size=16
-///
-/// # Arguments
-/// * `fib_log_size` - Log_size for Fibonacci circuit
-/// * `blake3_log_size` - Log_size for BLAKE3 circuit
-///
-/// # Returns
-/// The maximum log_size needed across all components
 pub fn compute_max_log_size(fib_log_size: u32, blake3_log_size: u32) -> u32 {
     use crate::blake::XOR12_MIN_LOG_SIZE;
 
@@ -84,9 +58,6 @@ pub fn compute_max_log_size(fib_log_size: u32, blake3_log_size: u32) -> u32 {
         .max(XOR12_MIN_LOG_SIZE)
 }
 
-// ============================================================================
-// Preprocessed Column Generation
-// ============================================================================
 
 pub fn gen_is_first_column(
     log_size: u32,
@@ -107,7 +78,6 @@ pub fn is_first_column_id(log_size: u32) -> PreProcessedColumnId {
     }
 }
 
-/// Generate is_active preprocessed column: 1 for rows 0..=target_element, 0 for rest
 pub fn gen_is_active_column(
     log_size: u32,
     target_element: usize,
@@ -115,12 +85,10 @@ pub fn gen_is_active_column(
     let n_rows = 1 << log_size;
     let mut col = Col::<SimdBackend, BaseField>::zeros(n_rows);
 
-    // Set 1 for all rows up to and including target_element
     for row in 0..=target_element.min(n_rows - 1) {
         col.set(row, BaseField::one());
     }
 
-    // Convert to bit-reversed circle domain order
     bit_reverse_coset_to_circle_domain_order(col.as_mut_slice());
 
     CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), col)
@@ -132,7 +100,6 @@ pub fn is_active_column_id(log_size: u32, target_element: usize) -> PreProcessed
     }
 }
 
-/// Generate is_target preprocessed column: 1 ONLY for target_element, 0 for rest (for LogUp)
 pub fn gen_is_target_column(
     log_size: u32,
     target_element: usize,
@@ -140,12 +107,10 @@ pub fn gen_is_target_column(
     let n_rows = 1 << log_size;
     let mut col = Col::<SimdBackend, BaseField>::zeros(n_rows);
 
-    // Set 1 ONLY for target_element
     if target_element < n_rows {
         col.set(target_element, BaseField::one());
     }
 
-    // Convert to bit-reversed circle domain order
     bit_reverse_coset_to_circle_domain_order(col.as_mut_slice());
 
     CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), col)
@@ -309,21 +274,6 @@ pub fn prove_multi_fib(
     ),
     Box<dyn std::error::Error>,
 > {
-    // Input validation
-    const MAX_TARGET_ELEMENT: usize = 1 << 20; // 2^20 = 1,048,576
-    if target_element_computing1 >= MAX_TARGET_ELEMENT {
-        return Err(format!(
-            "target_element_computing1 too large: {} >= {} (max)",
-            target_element_computing1, MAX_TARGET_ELEMENT
-        ).into());
-    }
-    if target_element_computing2 >= MAX_TARGET_ELEMENT {
-        return Err(format!(
-            "target_element_computing2 too large: {} >= {} (max)",
-            target_element_computing2, MAX_TARGET_ELEMENT
-        ).into());
-    }
-
     // Validate BLAKE3 inputs/hashes consistency
     if let (Some(ref inputs), Some(ref hashes)) = (&blake3_inputs, &blake3_expected_hashes) {
         if inputs.len() != hashes.len() {
@@ -335,20 +285,13 @@ pub fn prove_multi_fib(
         if inputs.is_empty() {
             return Err("BLAKE3 inputs cannot be empty when provided".into());
         }
-        const MAX_BLAKE3_INSTANCES: usize = 1024;
-        if inputs.len() > MAX_BLAKE3_INSTANCES {
-            return Err(format!(
-                "Too many BLAKE3 instances: {} > {} (max)",
-                inputs.len(), MAX_BLAKE3_INSTANCES
-            ).into());
-        }
     } else if blake3_inputs.is_some() || blake3_expected_hashes.is_some() {
         return Err("BLAKE3 inputs and expected_hashes must both be provided or both be None".into());
     }
 
     // Step 0: Compute dynamic log_size
     let max_target = target_element_computing1.max(target_element_computing2);
-    let min_rows = max_target + 1; // +1 because 0-indexed
+    let min_rows = max_target + 1;
     let min_log_size = if min_rows <= 1 {
         0
     } else {
@@ -421,12 +364,12 @@ pub fn prove_multi_fib(
     tracing::debug!("Step 2: Generating main traces...");
     let step_start = Instant::now();
     let (trace_computing1, fib1_c_value) =
-        gen_computing_trace(log_size, 1, 1, target_element_computing1);
+        gen_computing_trace(log_size, 0, 1, target_element_computing1);
     let (trace_computing2, fib2_c_value) =
-        gen_computing_trace(log_size, 1, 1, target_element_computing2);
+        gen_computing_trace(log_size, 0, 1, target_element_computing2);
     let trace_scheduler = gen_scheduler_trace(log_size, fib1_c_value, fib2_c_value);
     tracing::debug!("Computing1 trace (initial: 0, 1): {} rows", 1 << log_size);
-    tracing::debug!("Computing2 trace (initial: 1, 1): {} rows", 1 << log_size);
+    tracing::debug!("Computing2 trace (initial: 0, 1): {} rows", 1 << log_size);
     tracing::debug!("Scheduler trace: {} rows", 1 << log_size);
 
     // Step 2.5: Generate BLAKE3 traces if enabled
@@ -445,7 +388,7 @@ pub fn prove_multi_fib(
 
             // Generate scheduler trace
             let (scheduler_trace, scheduler_lookup_data, round_inputs) =
-                blake_scheduler::gen_trace(blake3_log, &blake_inputs);
+                blake_scheduler::gen_trace(blake3_log, &blake_inputs, target_element_computing1);
 
             // Generate rounds traces
             use crate::blake::XorAccums;
@@ -574,6 +517,7 @@ pub fn prove_multi_fib(
     tracing::debug!("Step 4: Drawing LogUp relation from channel...");
     let step_start = Instant::now();
     let fibonacci_relation = FibonacciRelation::draw(channel);
+    let index_relation = IndexRelation::draw(channel);
 
     // Step 5: Generate interaction traces (LogUp columns)
     tracing::debug!("Step 5: Generating LogUp interaction traces...");
@@ -628,6 +572,8 @@ pub fn prove_multi_fib(
                     lookup_data.clone(),
                     &blake3_round_elements,
                     &blake3_blake_elements,
+                    &index_relation,
+                    target_element_computing1,
                 )
             } else {
                 panic!("BLAKE3 scheduler trace missing");
@@ -793,9 +739,11 @@ pub fn prove_multi_fib(
         &mut tree_span_provider,
         FibonacciComputingEval {
             log_n_rows: log_size,
-            initial_a: 1,
+            initial_a: 0,
             initial_b: 1,
             fibonacci_relation: fibonacci_relation.clone(),
+            index_relation: index_relation.clone(),
+            fibonacci_index: target_element_computing1,
             claimed_sum: claimed_sum_computing1,
             is_first_id: is_first_id.clone(),
             is_active_id: is_active_column_id(log_size, target_element_computing1),
@@ -808,9 +756,11 @@ pub fn prove_multi_fib(
         &mut tree_span_provider,
         FibonacciComputingEval {
             log_n_rows: log_size,
-            initial_a: 1,
+            initial_a: 0,
             initial_b: 1,
             fibonacci_relation: fibonacci_relation.clone(),
+            index_relation: index_relation.clone(),
+            fibonacci_index: target_element_computing2,
             claimed_sum: claimed_sum_computing2,
             is_first_id: is_first_id.clone(),
             is_active_id: is_active_column_id(log_size, target_element_computing2),
@@ -847,6 +797,9 @@ pub fn prove_multi_fib(
                 log_size: blake3_log_size.unwrap(),
                 blake_lookup_elements: blake_blake_els.clone(),
                 round_lookup_elements: blake_round_els.clone(),
+                index_relation: index_relation.clone(),
+                fibonacci_index: target_element_computing1,
+                is_first_id: is_first_id.clone(),
                 claimed_sum: blake_sums.0,
             },
             blake_sums.0,
@@ -1025,6 +978,7 @@ pub fn verify_multi_fib(
     // Step 4: Draw FibonacciRelation from channel (must match prover)
     tracing::debug!("Step 4: Drawing LogUp relation from channel...");
     let fibonacci_relation = FibonacciRelation::draw(channel);
+    let index_relation = IndexRelation::draw(channel);
 
     // Step 4.5: Draw BLAKE3 lookup elements if present (must match prover order)
     let blake3_elements = if blake3_log_size.is_some() {
@@ -1083,9 +1037,11 @@ pub fn verify_multi_fib(
         &mut tree_span_provider,
         FibonacciComputingEval {
             log_n_rows: log_size,
-            initial_a: 1,
+            initial_a: 0,
             initial_b: 1,
             fibonacci_relation: fibonacci_relation.clone(),
+            index_relation: index_relation.clone(),
+            fibonacci_index: target_element_computing1,
             claimed_sum: statement1.claimed_sum_computing1,
             is_first_id: is_first_id.clone(),
             is_active_id: is_active_column_id(log_size, target_element_computing1),
@@ -1098,9 +1054,11 @@ pub fn verify_multi_fib(
         &mut tree_span_provider,
         FibonacciComputingEval {
             log_n_rows: log_size,
-            initial_a: 1,
+            initial_a: 0,
             initial_b: 1,
             fibonacci_relation: fibonacci_relation.clone(),
+            index_relation: index_relation.clone(),
+            fibonacci_index: target_element_computing2,
             claimed_sum: statement1.claimed_sum_computing2,
             is_first_id: is_first_id.clone(),
             is_active_id: is_active_column_id(log_size, target_element_computing2),
@@ -1146,6 +1104,9 @@ pub fn verify_multi_fib(
                     log_size: blake3_log,
                     round_lookup_elements: blake_round_els.clone(),
                     blake_lookup_elements: blake_blake_els.clone(),
+                    index_relation: index_relation.clone(),
+                    fibonacci_index: target_element_computing1,
+                    is_first_id: is_first_id.clone(),
                     claimed_sum: blake_sums.0,
                 },
                 blake_sums.0,
@@ -1290,13 +1251,13 @@ mod tests {
         let target_element_computing2 = 10;
         let log_size = 4; // 16 rows
 
-        // Generate traces for Computing1 (initial: 1, 1) up to element 5
+        // Generate traces for Computing1 (initial: 0, 1) up to element 5
         let (_trace_computing1, fib1_c_value) =
-            gen_computing_trace(log_size, 1, 1, target_element_computing1);
+            gen_computing_trace(log_size, 0, 1, target_element_computing1);
 
-        // Generate traces for Computing2 (initial: 1, 1) up to element 10
+        // Generate traces for Computing2 (initial: 0, 1) up to element 10
         let (_trace_computing2, fib2_c_value) =
-            gen_computing_trace(log_size, 1, 1, target_element_computing2);
+            gen_computing_trace(log_size, 0, 1, target_element_computing2);
 
         // Generate Scheduler trace (will sum specific values from both)
         let _trace_scheduler = gen_scheduler_trace(log_size, fib1_c_value, fib2_c_value);
@@ -1392,9 +1353,9 @@ mod tests {
 
         // Generate traces
         let (trace_computing1, fib1_c_value) =
-            gen_computing_trace(log_size, 1, 1, target_element_computing1);
+            gen_computing_trace(log_size, 0, 1, target_element_computing1);
         let (trace_computing2, fib2_c_value) =
-            gen_computing_trace(log_size, 1, 1, target_element_computing2);
+            gen_computing_trace(log_size, 0, 1, target_element_computing2);
         let trace_scheduler = gen_scheduler_trace(log_size, fib1_c_value, fib2_c_value);
 
         // Draw relation

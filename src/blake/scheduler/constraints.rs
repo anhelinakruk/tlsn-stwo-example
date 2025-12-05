@@ -36,7 +36,11 @@ pub fn eval_blake_scheduler_constraints<E: EvalAtRow>(
     eval: &mut E,
     blake_lookup_elements: &BlakeElements,
     round_lookup_elements: &RoundElements,
+    index_relation: &crate::multi_fib::IndexRelation,
+    fibonacci_index: usize,
+    is_first: E::F,
 ) {
+    use stwo::core::fields::m31::BaseField;
     let messages: [Fu32<E::F>; STATE_SIZE] = std::array::from_fn(|_| eval_next_u32(eval));
     let states: [[Fu32<E::F>; STATE_SIZE]; N_ROUNDS + 1] =
         std::array::from_fn(|_| std::array::from_fn(|_| eval_next_u32(eval)));
@@ -107,7 +111,20 @@ pub fn eval_blake_scheduler_constraints<E: EvalAtRow>(
         .collect_vec(),
     ));
 
+    // First finalize the paired LogUp columns (rounds + blake)
     eval.finalize_logup_in_pairs();
+
+    // Then add IndexRelation as separate column (added AFTER finalize_logup_in_pairs)
+    let index_value = BaseField::from_u32_unchecked(fibonacci_index as u32).into();
+    let multiplicity = (-is_first).into();  // consume -1 in first row
+    eval.add_to_relation(RelationEntry::new(
+        index_relation,
+        multiplicity,
+        &[index_value]
+    ));
+
+    // NOTE: DON'T call finalize_logup() here!
+    // The framework will call it automatically after evaluate() returns
 }
 
 fn eval_next_u32<E: EvalAtRow>(eval: &mut E) -> Fu32<E::F> {

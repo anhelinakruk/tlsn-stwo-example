@@ -14,9 +14,9 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::multi_fib::FibonacciRelation;
 
-/// Returns (trace columns, target_c_value)
-/// trace: 3 columns [a, b, c] where c = a + b
-/// target_c_value: the c value at target_element BEFORE bit-reverse
+/// Returns (trace columns, target_a_value)
+/// trace: 3 columns [a, b, c] where c = a + b, a[N] = fib(N)
+/// target_a_value: the a value at target_element BEFORE bit-reverse (= fib(target_element))
 ///
 /// Generates Fibonacci sequence only up to target_element (inclusive), rest are zeros
 pub fn gen_computing_trace(
@@ -39,7 +39,7 @@ pub fn gen_computing_trace(
 
     // Generate Fibonacci sequence ONLY up to target_element
     let rows_to_compute = (target_element + 1).min(n_rows);
-    let mut target_c_value = BaseField::zero();
+    let mut target_a_value = BaseField::zero();
 
     for row in 0..rows_to_compute {
         let c = a + b;
@@ -48,9 +48,10 @@ pub fn gen_computing_trace(
         col_b.set(row, b);
         col_c.set(row, c);
 
-        // Save the c value at target_element (BEFORE bit-reverse)
+        // Save the a value at target_element (BEFORE bit-reverse)
+        // a[N] = fib(N)
         if row == target_element {
-            target_c_value = c;
+            target_a_value = a;
         }
 
         a = b;
@@ -71,7 +72,7 @@ pub fn gen_computing_trace(
             CircleEvaluation::new(domain, col_b),
             CircleEvaluation::new(domain, col_c),
         ],
-        target_c_value,
+        target_a_value,
     )
 }
 
@@ -106,12 +107,12 @@ pub fn gen_computing_interaction_trace(
     {
         let mut col_gen = logup_gen.new_col();
 
-        // For each vec_row, yield the c value with selector masking
+        // For each vec_row, yield the a value with selector masking
         for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-            let c_value = trace[2].data[vec_row]; // Column c
+            let a_value = trace[0].data[vec_row]; // Column a (a[N] = fib(N))
 
-            // Compute denominator: fibonacci_relation.combine([c])
-            let denom = fibonacci_relation.combine(&[c_value]);
+            // Compute denominator: fibonacci_relation.combine([a])
+            let denom = fibonacci_relation.combine(&[a_value]);
 
             // Use selector from helper column - this has proper SIMD masking!
             // Only the lane corresponding to target_element will have numerator=1

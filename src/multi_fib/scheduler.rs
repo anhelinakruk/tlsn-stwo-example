@@ -72,14 +72,3 @@ impl FrameworkEval for FibonacciSchedulerEval {
 }
 
 pub type FibonacciSchedulerComponent = FrameworkComponent<FibonacciSchedulerEval>;
-
-pub fn fibonacci_scheduler_info() -> stwo_constraint_framework::InfoEvaluator {
-    use num_traits::Zero;
-    let component = FibonacciSchedulerEval {
-        log_n_rows: 1,
-        fibonacci_relation: super::FibonacciRelation::dummy(),
-        claimed_sum: SecureField::zero(),
-        is_first_id: PreProcessedColumnId { id: "dummy_is_first".to_string() },
-    };
-    component.evaluate(stwo_constraint_framework::InfoEvaluator::empty())
-}

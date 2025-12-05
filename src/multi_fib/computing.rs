@@ -6,7 +6,8 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
-use super::{FibonacciRelation, LOG_CONSTRAINT_DEGREE};
+
+use super::{FibonacciRelation, IndexRelation, LOG_CONSTRAINT_DEGREE};
 
 #[derive(Clone)]
 pub struct FibonacciComputingEval {
@@ -14,10 +15,12 @@ pub struct FibonacciComputingEval {
     pub initial_a: u32,
     pub initial_b: u32,
     pub fibonacci_relation: FibonacciRelation,
+    pub index_relation: IndexRelation,  
+    pub fibonacci_index: usize,  
     pub claimed_sum: SecureField,
     pub is_first_id: PreProcessedColumnId,
-    pub is_active_id: PreProcessedColumnId, // 1 for rows 0..=target_element, 0 for rest
-    pub is_target_id: PreProcessedColumnId, // 1 only for target_element (for LogUp)
+    pub is_active_id: PreProcessedColumnId, 
+    pub is_target_id: PreProcessedColumnId,
 }
 
 impl FrameworkEval for FibonacciComputingEval {
@@ -68,7 +71,13 @@ impl FrameworkEval for FibonacciComputingEval {
         eval.add_to_relation(RelationEntry::new(
             &self.fibonacci_relation,
             is_target.into(), // multiplicity: 1 only for target_element, 0 for rest (convert F to EF)
-            &[c_curr],        // value = c
+            &[a_curr],        // value = a (a[N] = fib(N))
+        ));
+
+        eval.add_to_relation(RelationEntry::new(
+            &self.index_relation, 
+            is_first.into(), 
+            &[BaseField::from_u32_unchecked(self.fibonacci_index as u32).into()]
         ));
 
         eval.finalize_logup_in_pairs();
@@ -79,18 +88,3 @@ impl FrameworkEval for FibonacciComputingEval {
 
 pub type FibonacciComputingComponent = FrameworkComponent<FibonacciComputingEval>;
 
-pub fn fibonacci_computing_info() -> stwo_constraint_framework::InfoEvaluator {
-    use super::FibonacciRelation;
-    use num_traits::Zero;
-    let component = FibonacciComputingEval {
-        log_n_rows: 1,
-        initial_a: 1,
-        initial_b: 1,
-        fibonacci_relation: FibonacciRelation::dummy(),
-        claimed_sum: SecureField::zero(),
-        is_first_id: PreProcessedColumnId { id: "dummy_is_first".to_string() },
-        is_active_id: PreProcessedColumnId { id: "dummy_is_active".to_string() },
-        is_target_id: PreProcessedColumnId { id: "dummy_is_target".to_string() },
-    };
-    component.evaluate(stwo_constraint_framework::InfoEvaluator::empty())
-}

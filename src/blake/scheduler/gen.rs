@@ -16,7 +16,7 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation, ORIGINAL_TRACE_IDX};
 use tracing::{span, Level};
 
-use super::{blake_scheduler_info, BlakeElements};
+use super::{BlakeElements, blake_scheduler_info};
 use crate::blake::blake3;
 use crate::blake::round::{BlakeRoundInput, RoundElements};
 use crate::blake::{to_felts, N_ROUNDS, N_ROUND_INPUT_FELTS, STATE_SIZE};
@@ -48,6 +48,7 @@ impl BlakeSchedulerLookupData {
 pub fn gen_trace(
     log_size: u32,
     inputs: &[BlakeInput],
+    _fibonacci_index: usize,  // Not stored in trace, passed as constant in BlakeSchedulerEval
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     BlakeSchedulerLookupData,
@@ -57,12 +58,18 @@ pub fn gen_trace(
     let mut lookup_data = BlakeSchedulerLookupData::new(log_size);
     let mut round_inputs = Vec::with_capacity(inputs.len() * N_ROUNDS);
 
-    let mut trace = (0..blake_scheduler_info().mask_offsets[ORIGINAL_TRACE_IDX].len())
+    // Calculate number of columns:
+    // 16*2 (messages) + 16*2 (initial_v) + 7*16*2 (v after each round)
+    // = 32 + 32 + 224 = 288 columns
+    // NOTE: fibonacci_index is NOT in trace - it's passed as a constant in BlakeSchedulerEval
+    let n_cols = STATE_SIZE * 2 + STATE_SIZE * 2 + N_ROUNDS * STATE_SIZE * 2;
+
+    let mut trace = (0..n_cols)
         .map(|_| unsafe { BaseColumn::uninitialized(1 << log_size) })
         .collect_vec();
 
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let mut col_index = 0;
+        let mut col_index = 0;  // Start from column 0
 
         let mut write_u32_array = |x: [u32x16; STATE_SIZE], col_index: &mut usize| {
             x.iter().for_each(|x| {
@@ -75,6 +82,7 @@ pub fn gen_trace(
 
         let BlakeInput { mut v, m } = inputs.get(vec_row).copied().unwrap_or_default();
         let initial_v = v;
+
         write_u32_array(m, &mut col_index);
         write_u32_array(v, &mut col_index);
 
@@ -126,6 +134,8 @@ pub fn gen_interaction_trace(
     lookup_data: BlakeSchedulerLookupData,
     round_lookup_elements: &RoundElements,
     blake_lookup_elements: &BlakeElements,
+    index_relation: &crate::multi_fib::IndexRelation,
+    fibonacci_index: usize,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
@@ -134,6 +144,7 @@ pub fn gen_interaction_trace(
 
     let mut logup_gen = LogupTraceGenerator::new(log_size);
 
+    // First, generate round pair columns (will be at beginning to match evaluate order)
     for [l0, l1] in lookup_data.round_lookups.array_chunks::<2>() {
         let mut col_gen = logup_gen.new_col();
 
@@ -150,31 +161,57 @@ pub fn gen_interaction_trace(
         col_gen.finalize_col();
     }
 
-    // Last pair. If the number of round is odd (as in blake3), we combine that last round lookup
-    // with the entire blake lookup.
-    let mut col_gen = logup_gen.new_col();
-    #[allow(clippy::needless_range_loop)]
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let p_blake: PackedSecureField = blake_lookup_elements.combine(
-            &lookup_data
-                .blake_lookups
-                .each_ref()
-                .map(|l| l.data[vec_row]),
-        );
-        if N_ROUNDS % 2 == 1 {
-            let p_round: PackedSecureField = round_lookup_elements.combine(
-                &lookup_data.round_lookups[N_ROUNDS - 1]
+    // Last pair (round6 + blake) - this matches the pairing in eval_blake_scheduler_constraints
+    {
+        let mut col_gen = logup_gen.new_col();
+        #[allow(clippy::needless_range_loop)]
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            let p_blake: PackedSecureField = blake_lookup_elements.combine(
+                &lookup_data
+                    .blake_lookups
                     .each_ref()
                     .map(|l| l.data[vec_row]),
             );
-            // TODO(alont): Remove.
-            col_gen.write_frac(vec_row, p_blake, p_round * p_blake);
-        } else {
-            // TODO(alont): Remove.
-            col_gen.write_frac(vec_row, PackedSecureField::zero(), p_blake);
+            if N_ROUNDS % 2 == 1 {
+                let p_round: PackedSecureField = round_lookup_elements.combine(
+                    &lookup_data.round_lookups[N_ROUNDS - 1]
+                        .each_ref()
+                        .map(|l| l.data[vec_row]),
+                );
+                col_gen.write_frac(vec_row, p_blake, p_round * p_blake);
+            } else {
+                col_gen.write_frac(vec_row, PackedSecureField::zero(), p_blake);
+            }
         }
+        col_gen.finalize_col();
     }
-    col_gen.finalize_col();
+
+    // IndexRelation column (separate, uses finalize_last not finalize_in_pairs)
+    {
+        use stwo::prover::backend::simd::m31::PackedM31;
+        use stwo::prover::backend::simd::qm31::PackedSecureField;
+        use stwo::core::fields::qm31::SecureField;
+        use num_traits::{One, Zero};
+
+        let mut col_gen = logup_gen.new_col();
+
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            let index_value = BaseField::from_u32_unchecked(fibonacci_index as u32);
+            let index_packed = PackedM31::broadcast(index_value);
+            let denom: PackedSecureField = index_relation.combine(&[index_packed]);
+
+            // Consume -1 in first row only
+            let numerator: PackedSecureField = if vec_row == 0 {
+                -PackedSecureField::broadcast(SecureField::one())
+            } else {
+                PackedSecureField::broadcast(SecureField::zero())
+            };
+
+            col_gen.write_frac(vec_row, numerator, denom);
+        }
+
+        col_gen.finalize_col();
+    }
 
     logup_gen.finalize_last()
 }

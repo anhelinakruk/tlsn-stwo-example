@@ -9,6 +9,7 @@ pub mod simple_fib;
 mod types;
 mod verifier;
 mod blake;
+// mod bridge;
 
 use prover::prover;
 use std::{

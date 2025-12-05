@@ -176,6 +176,9 @@ impl BlakeComponents {
                     log_size: stmt0.log_size,
                     blake_lookup_elements: all_elements.blake_elements.clone(),
                     round_lookup_elements: all_elements.round_elements.clone(),
+                    index_relation: crate::multi_fib::IndexRelation::dummy(),
+                    fibonacci_index: 0,  // dummy for standalone Blake AIR
+                    is_first_id: PreProcessedColumnId { id: "dummy_is_first".to_string() },
                     claimed_sum: stmt1.scheduler_claimed_sum,
                 },
                 stmt1.scheduler_claimed_sum,
@@ -328,7 +331,7 @@ where
 
     // Scheduler.
     let (scheduler_trace, scheduler_lookup_data, round_inputs) =
-        scheduler::gen_trace(log_size, &blake_inputs);
+        scheduler::gen_trace(log_size, &blake_inputs, 0);  // dummy index for standalone Blake AIR
 
     // Rounds.
     let mut xor_accums = XorAccums::default();
@@ -374,11 +377,14 @@ where
 
     // Interaction trace.
     let span = span!(Level::INFO, "Interaction").entered();
+    let index_relation = crate::multi_fib::IndexRelation::dummy();
     let (scheduler_trace, scheduler_claimed_sum) = scheduler::gen_interaction_trace(
         log_size,
         scheduler_lookup_data,
         &all_elements.round_elements,
         &all_elements.blake_elements,
+        &index_relation,
+        0,  // dummy fibonacci_index for standalone Blake AIR
     );
 
     let (round_traces, round_claimed_sums): (Vec<_>, Vec<_>) = multiunzip(
